@@ -495,16 +495,10 @@ def main():
         epilog="""
 Examples:
   music-stats                Show this year's stats
-  music-stats --month        Show this month's stats
   music-stats --week         Show last 7 days
-  music-stats --year 2025    Show stats for 2025
-  music-stats --all-time     Show all-time stats
-  music-stats --deep         Show advanced analytics
-  music-stats --milestones   Show achievements
-  music-stats --personality  Show listening personality
-  music-stats --fun-facts    Show fun facts
-  music-stats --evolution    Show monthly taste evolution
   music-stats --full         Show everything
+  music-stats --scan ~/Music Scan library for metadata
+  music-stats --library      Show library statistics
         """
     )
 
@@ -521,7 +515,28 @@ Examples:
     parser.add_argument('--evolution', action='store_true', help='Show monthly taste evolution')
     parser.add_argument('--full', action='store_true', help='Show all stats including advanced')
 
+    # Library options
+    parser.add_argument('--scan', metavar='PATH', help='Scan music folder for metadata')
+    parser.add_argument('--library', action='store_true', help='Show library statistics')
+
     args = parser.parse_args()
+
+    # Handle library commands first
+    if args.scan:
+        try:
+            import library_scanner
+            library_scanner.scan_directory(args.scan)
+        except ImportError:
+            print("Library scanner not available")
+        return
+
+    if args.library:
+        try:
+            import library_scanner
+            library_scanner.display_library_stats()
+        except ImportError:
+            print("Library scanner not available")
+        return
 
     now = datetime.now()
 
