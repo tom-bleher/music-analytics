@@ -64,6 +64,7 @@ def init_db():
         ("screen_on", "INTEGER"),  # 1 if screen is on
         ("on_battery", "INTEGER"),  # 1 if on battery power
         ("player_name", "TEXT"),  # Which player was used
+        ("is_local", "INTEGER"),  # 1 for local files, 0 for streaming/non-local
     ]
 
     # Get existing columns
@@ -149,6 +150,7 @@ def log_play(
     screen_on: Optional[int] = None,
     on_battery: Optional[int] = None,
     player_name: Optional[str] = None,
+    is_local: Optional[int] = None,
 ):
     """Log a play to the database."""
     conn = get_connection()
@@ -161,9 +163,9 @@ def log_play(
             seek_count, intro_skipped, seek_forward_ms, seek_backward_ms,
             app_volume, system_volume, effective_volume,
             hour_of_day, day_of_week, is_weekend, season,
-            active_window, screen_on, on_battery, player_name
+            active_window, screen_on, on_battery, player_name, is_local
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             title, artist, album, duration_ms, played_ms, file_path,
@@ -172,7 +174,7 @@ def log_play(
             seek_count, intro_skipped, seek_forward_ms, seek_backward_ms,
             app_volume, system_volume, effective_volume,
             hour_of_day, day_of_week, is_weekend, season,
-            active_window, screen_on, on_battery, player_name
+            active_window, screen_on, on_battery, player_name, is_local
         ),
     )
     conn.commit()
@@ -365,6 +367,72 @@ def get_all_audio_features() -> List[dict]:
         }
         for row in rows
     ]
+
+
+def delete_non_local_plays() -> int:
+    """Delete ONLY explicitly non-local plays from the database.
+
+    SAFE: Only deletes plays that are EXPLICITLY identified as non-local:
+    - is_local = 0 (explicitly marked as non-local)
+    - file_path starts with http://, https://, spotify:, etc.
+
+    Does NOT delete plays with NULL values (preserves legacy/unknown data).
+
+    Returns:
+        Number of rows deleted
+    """
+    conn = get_connection()
+
+    # Count before deletion for reporting
+    cursor = conn.execute("""
+        SELECT COUNT(*) FROM plays
+        WHERE is_local = 0
+           OR (file_path IS NOT NULL AND (
+               file_path LIKE 'http://%'
+               OR file_path LIKE 'https://%'
+               OR file_path LIKE 'spotify:%'
+               OR file_path LIKE 'deezer:%'
+               OR file_path LIKE 'tidal:%'
+           ))
+    """)
+    count = cursor.fetchone()[0]
+
+    # Delete only explicitly non-local plays
+    conn.execute("""
+        DELETE FROM plays
+        WHERE is_local = 0
+           OR (file_path IS NOT NULL AND (
+               file_path LIKE 'http://%'
+               OR file_path LIKE 'https://%'
+               OR file_path LIKE 'spotify:%'
+               OR file_path LIKE 'deezer:%'
+               OR file_path LIKE 'tidal:%'
+           ))
+    """)
+
+    conn.commit()
+    conn.close()
+
+    return count
+
+
+def get_non_local_plays_count() -> int:
+    """Get count of explicitly non-local plays in the database."""
+    conn = get_connection()
+    cursor = conn.execute("""
+        SELECT COUNT(*) FROM plays
+        WHERE is_local = 0
+           OR (file_path IS NOT NULL AND (
+               file_path LIKE 'http://%'
+               OR file_path LIKE 'https://%'
+               OR file_path LIKE 'spotify:%'
+               OR file_path LIKE 'deezer:%'
+               OR file_path LIKE 'tidal:%'
+           ))
+    """)
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
 
 
 # Initialize database on import
