@@ -51,6 +51,10 @@ def init_db():
         ("intro_skipped", "INTEGER"),  # 1 if seeked past first 15s
         ("seek_forward_ms", "INTEGER"),
         ("seek_backward_ms", "INTEGER"),
+        # Volume tracking
+        ("app_volume", "REAL"),  # MPRIS app volume (0.0-1.0)
+        ("system_volume", "REAL"),  # PulseAudio volume (0.0-1.0)
+        ("effective_volume", "REAL"),  # Combined volume (app × system)
     ]
 
     # Get existing columns
@@ -101,6 +105,9 @@ def log_play(
     intro_skipped: Optional[int] = None,
     seek_forward_ms: Optional[int] = None,
     seek_backward_ms: Optional[int] = None,
+    app_volume: Optional[float] = None,
+    system_volume: Optional[float] = None,
+    effective_volume: Optional[float] = None,
 ):
     """Log a play to the database."""
     conn = get_connection()
@@ -110,15 +117,17 @@ def log_play(
             title, artist, album, duration_ms, played_ms, file_path,
             genre, album_artist, track_number, disc_number, release_date,
             art_url, user_rating, bpm, composer, musicbrainz_track_id,
-            seek_count, intro_skipped, seek_forward_ms, seek_backward_ms
+            seek_count, intro_skipped, seek_forward_ms, seek_backward_ms,
+            app_volume, system_volume, effective_volume
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             title, artist, album, duration_ms, played_ms, file_path,
             genre, album_artist, track_number, disc_number, release_date,
             art_url, user_rating, bpm, composer, musicbrainz_track_id,
-            seek_count, intro_skipped, seek_forward_ms, seek_backward_ms
+            seek_count, intro_skipped, seek_forward_ms, seek_backward_ms,
+            app_volume, system_volume, effective_volume
         ),
     )
     conn.commit()

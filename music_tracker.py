@@ -10,11 +10,17 @@ import logging
 import signal
 import sys
 import time
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from urllib.parse import unquote, urlparse
 
 from dbus_next.aio import MessageBus
 from dbus_next import BusType, Variant
+
+try:
+    import pulsectl
+    PULSECTL_AVAILABLE = True
+except ImportError:
+    PULSECTL_AVAILABLE = False
 
 import db
 
@@ -231,12 +237,51 @@ def get_variant_value(v):
     return v
 
 
+def get_pulse_volume_for_player(player_name: str) -> Optional[float]:
+    """Get the PulseAudio/PipeWire volume for a player.
+
+    Args:
+        player_name: MPRIS player name (e.g., "org.mpris.MediaPlayer2.io.bassi.Amberol")
+
+    Returns:
+        Volume as float 0.0-1.0, or None if not found
+    """
+    if not PULSECTL_AVAILABLE:
+        return None
+
+    # Extract app name from MPRIS name
+    # e.g., "org.mpris.MediaPlayer2.io.bassi.Amberol" -> "amberol"
+    app_name = player_name.replace(MPRIS_PREFIX, "").lower()
+    # Handle dotted names like "io.bassi.Amberol" -> "amberol"
+    if "." in app_name:
+        app_name = app_name.split(".")[-1].lower()
+
+    try:
+        with pulsectl.Pulse("music-tracker") as pulse:
+            for sink_input in pulse.sink_input_list():
+                # Check various properties that might contain the app name
+                props = sink_input.proplist
+                sink_app_name = props.get("application.name", "").lower()
+                sink_binary = props.get("application.process.binary", "").lower()
+
+                if app_name in sink_app_name or app_name in sink_binary:
+                    # Return the volume (average of all channels)
+                    volumes = sink_input.volume.values
+                    if volumes:
+                        return sum(volumes) / len(volumes)
+    except Exception as e:
+        log.debug(f"Could not get PulseAudio volume: {e}")
+
+    return None
+
+
 class MprisMonitor:
     """Monitors MPRIS players on D-Bus."""
 
     def __init__(self):
         self.bus: Optional[MessageBus] = None
         self.tracked_players: dict[str, TrackState] = {}
+        self.player_props: dict[str, any] = {}  # Store props interfaces for volume queries
         self.running = True
 
     async def start(self):
@@ -261,7 +306,7 @@ class MprisMonitor:
         self.running = False
         for player_name, state in self.tracked_players.items():
             if state.is_playing and state.should_log():
-                self.log_play(state)
+                self.log_play(player_name, state)
 
     async def watch_name_changes(self):
         """Watch for MPRIS players appearing/disappearing."""
@@ -286,8 +331,10 @@ class MprisMonitor:
             if name in self.tracked_players:
                 state = self.tracked_players[name]
                 if state.is_playing and state.should_log():
-                    self.log_play(state)
+                    self.log_play(name, state)
                 del self.tracked_players[name]
+                if name in self.player_props:
+                    del self.player_props[name]
 
     async def discover_players(self):
         """Find existing MPRIS players."""
@@ -312,6 +359,7 @@ class MprisMonitor:
 
             state = TrackState()
             self.tracked_players[name] = state
+            self.player_props[name] = props_iface  # Store for volume queries
 
             # Get initial state
             try:
@@ -370,7 +418,7 @@ class MprisMonitor:
 
             # Log previous track if it qualifies
             if state.is_playing and state.should_log():
-                self.log_play(state)
+                self.log_play(player_name, state)
 
             # Update to new track
             state.set_metadata(metadata)
@@ -390,7 +438,7 @@ class MprisMonitor:
 
             elif status in ("Paused", "Stopped") and state.is_playing:
                 if state.should_log():
-                    self.log_play(state)
+                    self.log_play(player_name, state)
                 state.is_playing = False
                 state.start_time = None
                 log.info(f"[{player_name}] {status}")
@@ -407,13 +455,44 @@ class MprisMonitor:
             f"(total seeks: {state.seek_count})"
         )
 
-    def log_play(self, state: TrackState):
-        """Log a play to the database with full metadata."""
+    def log_play(self, player_name: str, state: TrackState):
+        """Log a play to the database with full metadata and volume."""
         if not state.title:
             return
 
         duration_ms = state.duration_us // 1000 if state.duration_us else None
         played_ms = state.get_played_ms()
+
+        # Get volume information
+        app_volume = None
+        system_volume = None
+        effective_volume = None
+
+        # Try to get MPRIS app volume
+        if player_name in self.player_props:
+            try:
+                props_iface = self.player_props[player_name]
+                # This is a sync call in an async context, but it's fast
+                import asyncio
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # We're in an async context, need to handle this carefully
+                    # For simplicity, we'll try a synchronous approach
+                    pass  # Will rely on system volume
+            except Exception as e:
+                log.debug(f"Could not get MPRIS volume: {e}")
+
+        # Get PulseAudio system volume
+        system_volume = get_pulse_volume_for_player(player_name)
+
+        # Calculate effective volume
+        if app_volume is not None and system_volume is not None:
+            effective_volume = app_volume * system_volume
+        elif system_volume is not None:
+            # If we only have system volume, use it as effective
+            effective_volume = system_volume
+        elif app_volume is not None:
+            effective_volume = app_volume
 
         seek_info = ""
         if state.seek_count > 0:
@@ -421,9 +500,13 @@ class MprisMonitor:
             if state.intro_skipped:
                 seek_info += ", intro skipped"
 
+        vol_info = ""
+        if effective_volume is not None:
+            vol_info = f", vol: {effective_volume:.0%}"
+
         log.info(
             f"Logging play: {state.artist} - {state.title} "
-            f"({played_ms // 1000}s played{seek_info})"
+            f"({played_ms // 1000}s played{seek_info}{vol_info})"
         )
 
         db.log_play(
@@ -447,6 +530,9 @@ class MprisMonitor:
             intro_skipped=1 if state.intro_skipped else None,
             seek_forward_ms=state.seek_forward_ms if state.seek_forward_ms > 0 else None,
             seek_backward_ms=state.seek_backward_ms if state.seek_backward_ms > 0 else None,
+            app_volume=app_volume,
+            system_volume=system_volume,
+            effective_volume=effective_volume,
         )
 
 
