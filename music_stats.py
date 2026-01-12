@@ -7,11 +7,17 @@ Display listening statistics from the music analytics database.
 
 import argparse
 import sqlite3
-from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "listens.db"
+
+# Import analytics functions
+try:
+    import analytics
+    HAS_ANALYTICS = True
+except ImportError:
+    HAS_ANALYTICS = False
 
 
 def get_connection() -> sqlite3.Connection:
@@ -24,11 +30,9 @@ def format_duration(ms: int) -> str:
     """Format milliseconds as human-readable duration."""
     if ms is None:
         return "?"
-
     seconds = ms // 1000
     hours = seconds // 3600
     minutes = (seconds % 3600) // 60
-
     if hours > 0:
         return f"{hours}h {minutes}m"
     return f"{minutes}m"
@@ -216,7 +220,6 @@ def display_stats(stats: dict, period_name: str):
         hourly_dict = {row['hour']: row['play_count'] for row in stats['hourly']}
         max_hourly = max(hourly_dict.values()) if hourly_dict else 1
 
-        # Group into time periods
         periods = [
             ("Morning (6-12)", range(6, 12)),
             ("Afternoon (12-18)", range(12, 18)),
@@ -224,10 +227,10 @@ def display_stats(stats: dict, period_name: str):
             ("Night (0-6)", range(0, 6)),
         ]
 
-        for period_name, hours in periods:
+        for pname, hours in periods:
             count = sum(hourly_dict.get(h, 0) for h in hours)
             bar = print_bar(count, max_hourly * 6, 25)
-            print(f"  {period_name:<20} {bar} {count:>4}")
+            print(f"  {pname:<20} {bar} {count:>4}")
 
     # Listening by day
     if stats['daily']:
@@ -244,17 +247,226 @@ def display_stats(stats: dict, period_name: str):
     print(f"\n{'*' * 50}\n")
 
 
+def display_advanced_stats(start_date: datetime, end_date: datetime, period_name: str):
+    """Display advanced analytics from the analytics module."""
+    if not HAS_ANALYTICS:
+        print("Advanced analytics not available.")
+        return
+
+    conn = get_connection()
+
+    # Time-based patterns
+    print_section("LISTENING STREAKS")
+    try:
+        streaks = analytics.get_listening_streaks(conn, start_date, end_date)
+        print(f"  Current streak:   {streaks['current_streak']} days")
+        print(f"  Longest streak:   {streaks['longest_streak']} days")
+        if streaks['longest_streak_start']:
+            print(f"    ({streaks['longest_streak_start']} to {streaks['longest_streak_end']})")
+    except Exception as e:
+        print(f"  Error: {e}")
+
+    print_section("LISTENING SESSIONS")
+    try:
+        sessions = analytics.get_sessions(conn, start_date, end_date)
+        print(f"  Total sessions:   {sessions['total_sessions']}")
+        print(f"  Avg session:      {sessions['avg_session_length_minutes']:.0f} minutes")
+        print(f"  Longest session:  {sessions['longest_session_minutes']:.0f} minutes")
+    except Exception as e:
+        print(f"  Error: {e}")
+
+    print_section("NIGHT OWL SCORE")
+    try:
+        night_owl = analytics.get_night_owl_score(conn, start_date, end_date)
+        pct = night_owl['night_owl_percentage']
+        bar = print_bar(int(pct), 100, 20)
+        print(f"  Night listening:  {bar} {pct:.1f}%")
+        print(f"  ({night_owl['night_plays']} plays between midnight-6am)")
+    except Exception as e:
+        print(f"  Error: {e}")
+
+    print_section("BIGGEST LISTENING DAY")
+    try:
+        biggest = analytics.get_biggest_listening_day(conn, start_date, end_date)
+        if biggest['date']:
+            print(f"  Date:             {biggest['date']}")
+            print(f"  Plays:            {biggest['play_count']}")
+            print(f"  Listening time:   {biggest['listening_minutes']:.0f} minutes")
+            if biggest['top_artist']:
+                print(f"  Top artist:       {biggest['top_artist']}")
+    except Exception as e:
+        print(f"  Error: {e}")
+
+    # Track behavior
+    print_section("TRACK BEHAVIOR")
+    try:
+        skip_rate = analytics.get_skip_rate(conn, start_date, end_date)
+        print(f"  Skip rate:        {skip_rate['skip_percentage']:.1f}%")
+        print(f"  Skipped tracks:   {skip_rate['total_skips']} / {skip_rate['total_plays']}")
+    except Exception as e:
+        print(f"  Error: {e}")
+
+    try:
+        full_vs_partial = analytics.get_full_listens_vs_partial(conn, start_date, end_date)
+        print(f"  Full listens:     {full_vs_partial['full_listen_percentage']:.1f}%")
+        print(f"  Avg completion:   {full_vs_partial['average_completion_percentage']:.1f}%")
+    except Exception as e:
+        pass
+
+    try:
+        avg_length = analytics.get_average_track_length(conn, start_date, end_date)
+        print(f"  Avg track length: {avg_length['average_duration_formatted']}")
+    except Exception as e:
+        pass
+
+    # Artist insights
+    print_section("ARTIST INSIGHTS")
+    try:
+        discovery = analytics.get_discovery_rate(conn, start_date, end_date)
+        print(f"  Discovery rate:   {discovery['discovery_rate']:.1f}%")
+        print(f"  New artists:      {discovery['new_artists']}")
+        print(f"  Returning:        {discovery['returning_artists']}")
+    except Exception as e:
+        print(f"  Error: {e}")
+
+    try:
+        one_hits = analytics.get_one_hit_wonders(conn, start_date, end_date)
+        print(f"  One-hit wonders:  {len(one_hits)} artists")
+    except Exception as e:
+        pass
+
+    conn.close()
+
+
+def display_milestones():
+    """Display achievements and milestones."""
+    if not HAS_ANALYTICS:
+        print("Milestones not available.")
+        return
+
+    conn = get_connection()
+
+    print_section("MILESTONES & ACHIEVEMENTS")
+    try:
+        milestones = analytics.get_milestones(conn)
+        if milestones:
+            for m in milestones:
+                icon = m.get('icon', '🏆')
+                name = m.get('name', 'Achievement')
+                desc = m.get('description', '')
+                date = m.get('achieved_date', '')
+                print(f"  {icon} {name}")
+                if desc:
+                    print(f"      {desc}")
+                if date:
+                    print(f"      Achieved: {date}")
+                print()
+        else:
+            print("  No milestones achieved yet. Keep listening!")
+    except Exception as e:
+        print(f"  Error: {e}")
+
+    conn.close()
+
+
+def display_personality(start_date: datetime, end_date: datetime):
+    """Display listening personality analysis."""
+    if not HAS_ANALYTICS:
+        print("Personality analysis not available.")
+        return
+
+    conn = get_connection()
+
+    print_section("YOUR LISTENING PERSONALITY")
+    try:
+        personality = analytics.get_listening_personality(conn, start_date, end_date)
+        primary = personality.get('primary_type', 'Unknown')
+        secondary = personality.get('secondary_type')
+        desc = personality.get('description', '')
+
+        print(f"  You are: {primary}")
+        if secondary:
+            print(f"  With hints of: {secondary}")
+        if desc:
+            print(f"\n  {desc}")
+
+        traits = personality.get('traits', [])
+        if traits:
+            print("\n  Key traits:")
+            for trait in traits[:5]:
+                print(f"    - {trait}")
+    except Exception as e:
+        print(f"  Error: {e}")
+
+    conn.close()
+
+
+def display_fun_facts(start_date: datetime, end_date: datetime):
+    """Display fun facts about listening habits."""
+    if not HAS_ANALYTICS:
+        print("Fun facts not available.")
+        return
+
+    conn = get_connection()
+
+    print_section("FUN FACTS")
+    try:
+        facts = analytics.get_fun_facts(conn, start_date, end_date)
+        if isinstance(facts, list):
+            for fact in facts:
+                print(f"  * {fact}")
+        elif isinstance(facts, dict):
+            for key, value in facts.items():
+                print(f"  * {value}")
+    except Exception as e:
+        print(f"  Error: {e}")
+
+    conn.close()
+
+
+def display_monthly_evolution(year: int):
+    """Display how taste evolved month by month."""
+    if not HAS_ANALYTICS:
+        print("Monthly evolution not available.")
+        return
+
+    conn = get_connection()
+
+    print_section(f"MONTHLY TOP ARTISTS - {year}")
+    try:
+        monthly = analytics.get_monthly_top_artists(conn, year)
+        for m in monthly:
+            month_name = m.get('month_name', f"Month {m.get('month', '?')}")
+            top_artist = m.get('top_artist', '-')
+            plays = m.get('play_count', 0)
+            if top_artist and top_artist != '-':
+                bar = print_bar(plays, max(x.get('play_count', 0) for x in monthly) or 1, 15)
+                print(f"  {month_name[:3]:<3}  {top_artist[:25]:<25} {bar} {plays:>3}")
+            else:
+                print(f"  {month_name[:3]:<3}  -")
+    except Exception as e:
+        print(f"  Error: {e}")
+
+    conn.close()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Display your music listening statistics",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  music-stats              Show this year's stats
-  music-stats --month      Show this month's stats
-  music-stats --week       Show last 7 days
-  music-stats --year 2025  Show stats for 2025
-  music-stats --all-time   Show all-time stats
+  music-stats                Show this year's stats
+  music-stats --month        Show this month's stats
+  music-stats --week         Show last 7 days
+  music-stats --year 2025    Show stats for 2025
+  music-stats --all-time     Show all-time stats
+  music-stats --deep         Show advanced analytics
+  music-stats --milestones   Show achievements
+  music-stats --personality  Show listening personality
+  music-stats --fun-facts    Show fun facts
+  music-stats --evolution    Show monthly taste evolution
+  music-stats --full         Show everything
         """
     )
 
@@ -262,6 +474,14 @@ Examples:
     parser.add_argument('--month', action='store_true', help='Show stats for current month')
     parser.add_argument('--week', action='store_true', help='Show stats for last 7 days')
     parser.add_argument('--all-time', action='store_true', help='Show all-time stats')
+
+    # Advanced options
+    parser.add_argument('--deep', action='store_true', help='Show advanced analytics')
+    parser.add_argument('--milestones', action='store_true', help='Show achievements')
+    parser.add_argument('--personality', action='store_true', help='Show listening personality')
+    parser.add_argument('--fun-facts', action='store_true', help='Show fun facts')
+    parser.add_argument('--evolution', action='store_true', help='Show monthly taste evolution')
+    parser.add_argument('--full', action='store_true', help='Show all stats including advanced')
 
     args = parser.parse_args()
 
@@ -294,8 +514,26 @@ Examples:
         print("Make sure music-tracker is running and play some music!")
         return
 
+    # Always show basic stats
     stats = get_stats(start_date, end_date)
     display_stats(stats, period_name)
+
+    # Show advanced stats if requested
+    if args.deep or args.full:
+        display_advanced_stats(start_date, end_date, period_name)
+
+    if args.milestones or args.full:
+        display_milestones()
+
+    if args.personality or args.full:
+        display_personality(start_date, end_date)
+
+    if args.fun_facts or args.full:
+        display_fun_facts(start_date, end_date)
+
+    if args.evolution or args.full:
+        year = args.year if args.year else now.year
+        display_monthly_evolution(year)
 
 
 if __name__ == "__main__":
