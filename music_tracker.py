@@ -60,6 +60,13 @@ class TrackState:
         self.composer: Optional[str] = None
         self.musicbrainz_track_id: Optional[str] = None
 
+        # Seek tracking
+        self.seek_count: int = 0
+        self.intro_skipped: bool = False
+        self.seek_forward_ms: int = 0
+        self.seek_backward_ms: int = 0
+        self.last_position_us: int = 0  # Last known position for seek detection
+
     def reset(self):
         self.title = None
         self.artist = None
@@ -78,6 +85,12 @@ class TrackState:
         self.bpm = None
         self.composer = None
         self.musicbrainz_track_id = None
+        # Reset seek tracking
+        self.seek_count = 0
+        self.intro_skipped = False
+        self.seek_forward_ms = 0
+        self.seek_backward_ms = 0
+        self.last_position_us = 0
 
     def set_metadata(self, metadata: dict):
         """Update track info from MPRIS metadata."""
@@ -186,6 +199,29 @@ class TrackState:
         if not self.start_time:
             return 0
         return int((time.time() - self.start_time) * 1000)
+
+    def on_seeked(self, new_position_us: int):
+        """Handle a seek event.
+
+        Args:
+            new_position_us: New position in microseconds
+        """
+        self.seek_count += 1
+
+        # Calculate seek delta
+        delta_us = new_position_us - self.last_position_us
+        delta_ms = delta_us // 1000
+
+        if delta_us > 0:
+            self.seek_forward_ms += delta_ms
+        else:
+            self.seek_backward_ms += abs(delta_ms)
+
+        # Check if intro was skipped (seeked past first 15 seconds from near start)
+        if self.last_position_us < 5_000_000 and new_position_us > 15_000_000:
+            self.intro_skipped = True
+
+        self.last_position_us = new_position_us
 
 
 def get_variant_value(v):
@@ -302,7 +338,20 @@ class MprisMonitor:
                 return handler
 
             props_iface.on_properties_changed(make_handler(name))
-            log.info(f"Now monitoring: {name}")
+
+            # Subscribe to Seeked signal for seek tracking
+            try:
+                player_iface = player_obj.get_interface(MPRIS_PLAYER_IFACE)
+
+                def make_seeked_handler(player_name: str):
+                    def handler(position_us: int):
+                        self.on_player_seeked(player_name, position_us)
+                    return handler
+
+                player_iface.on_seeked(make_seeked_handler(name))
+                log.info(f"Now monitoring (with seek tracking): {name}")
+            except Exception as e:
+                log.info(f"Now monitoring: {name} (seek tracking unavailable: {e})")
 
         except Exception as e:
             log.error(f"Failed to monitor {name}: {e}")
@@ -346,6 +395,18 @@ class MprisMonitor:
                 state.start_time = None
                 log.info(f"[{player_name}] {status}")
 
+    def on_player_seeked(self, player_name: str, position_us: int):
+        """Handle seek event from a player."""
+        if player_name not in self.tracked_players:
+            return
+
+        state = self.tracked_players[player_name]
+        state.on_seeked(position_us)
+        log.debug(
+            f"[{player_name}] Seeked to {position_us // 1_000_000}s "
+            f"(total seeks: {state.seek_count})"
+        )
+
     def log_play(self, state: TrackState):
         """Log a play to the database with full metadata."""
         if not state.title:
@@ -354,9 +415,15 @@ class MprisMonitor:
         duration_ms = state.duration_us // 1000 if state.duration_us else None
         played_ms = state.get_played_ms()
 
+        seek_info = ""
+        if state.seek_count > 0:
+            seek_info = f", {state.seek_count} seeks"
+            if state.intro_skipped:
+                seek_info += ", intro skipped"
+
         log.info(
             f"Logging play: {state.artist} - {state.title} "
-            f"({played_ms // 1000}s played)"
+            f"({played_ms // 1000}s played{seek_info})"
         )
 
         db.log_play(
@@ -376,6 +443,10 @@ class MprisMonitor:
             bpm=state.bpm,
             composer=state.composer,
             musicbrainz_track_id=state.musicbrainz_track_id,
+            seek_count=state.seek_count if state.seek_count > 0 else None,
+            intro_skipped=1 if state.intro_skipped else None,
+            seek_forward_ms=state.seek_forward_ms if state.seek_forward_ms > 0 else None,
+            seek_backward_ms=state.seek_backward_ms if state.seek_backward_ms > 0 else None,
         )
 
 

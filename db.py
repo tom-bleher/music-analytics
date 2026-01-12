@@ -46,6 +46,11 @@ def init_db():
         ("bpm", "INTEGER"),
         ("composer", "TEXT"),
         ("musicbrainz_track_id", "TEXT"),
+        # Seek tracking
+        ("seek_count", "INTEGER"),
+        ("intro_skipped", "INTEGER"),  # 1 if seeked past first 15s
+        ("seek_forward_ms", "INTEGER"),
+        ("seek_backward_ms", "INTEGER"),
     ]
 
     # Get existing columns
@@ -92,6 +97,10 @@ def log_play(
     bpm: Optional[int] = None,
     composer: Optional[str] = None,
     musicbrainz_track_id: Optional[str] = None,
+    seek_count: Optional[int] = None,
+    intro_skipped: Optional[int] = None,
+    seek_forward_ms: Optional[int] = None,
+    seek_backward_ms: Optional[int] = None,
 ):
     """Log a play to the database."""
     conn = get_connection()
@@ -100,14 +109,16 @@ def log_play(
         INSERT INTO plays (
             title, artist, album, duration_ms, played_ms, file_path,
             genre, album_artist, track_number, disc_number, release_date,
-            art_url, user_rating, bpm, composer, musicbrainz_track_id
+            art_url, user_rating, bpm, composer, musicbrainz_track_id,
+            seek_count, intro_skipped, seek_forward_ms, seek_backward_ms
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             title, artist, album, duration_ms, played_ms, file_path,
             genre, album_artist, track_number, disc_number, release_date,
-            art_url, user_rating, bpm, composer, musicbrainz_track_id
+            art_url, user_rating, bpm, composer, musicbrainz_track_id,
+            seek_count, intro_skipped, seek_forward_ms, seek_backward_ms
         ),
     )
     conn.commit()
