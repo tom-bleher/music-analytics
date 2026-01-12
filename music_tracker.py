@@ -10,7 +10,7 @@ import logging
 import signal
 import sys
 import time
-from typing import Optional
+from typing import Optional, List
 from urllib.parse import unquote, urlparse
 
 from dbus_next.aio import MessageBus
@@ -36,9 +36,10 @@ log = logging.getLogger(__name__)
 
 
 class TrackState:
-    """Tracks the current playing state."""
+    """Tracks the current playing state with full metadata."""
 
     def __init__(self):
+        # Core fields
         self.title: Optional[str] = None
         self.artist: Optional[str] = None
         self.album: Optional[str] = None
@@ -46,6 +47,18 @@ class TrackState:
         self.file_path: Optional[str] = None
         self.start_time: Optional[float] = None
         self.is_playing: bool = False
+
+        # Extended metadata
+        self.genre: Optional[str] = None
+        self.album_artist: Optional[str] = None
+        self.track_number: Optional[int] = None
+        self.disc_number: Optional[int] = None
+        self.release_date: Optional[str] = None
+        self.art_url: Optional[str] = None
+        self.user_rating: Optional[float] = None
+        self.bpm: Optional[int] = None
+        self.composer: Optional[str] = None
+        self.musicbrainz_track_id: Optional[str] = None
 
     def reset(self):
         self.title = None
@@ -55,11 +68,23 @@ class TrackState:
         self.file_path = None
         self.start_time = None
         self.is_playing = False
+        self.genre = None
+        self.album_artist = None
+        self.track_number = None
+        self.disc_number = None
+        self.release_date = None
+        self.art_url = None
+        self.user_rating = None
+        self.bpm = None
+        self.composer = None
+        self.musicbrainz_track_id = None
 
     def set_metadata(self, metadata: dict):
         """Update track info from MPRIS metadata."""
+        # Core fields
         self.title = get_variant_value(metadata.get("xesam:title"))
 
+        # Artist (array of strings)
         artists = get_variant_value(metadata.get("xesam:artist"))
         if isinstance(artists, list) and artists:
             self.artist = artists[0]
@@ -69,6 +94,7 @@ class TrackState:
         self.album = get_variant_value(metadata.get("xesam:album"))
         self.duration_us = get_variant_value(metadata.get("mpris:length"))
 
+        # File path from URL
         url = get_variant_value(metadata.get("xesam:url"))
         if url:
             parsed = urlparse(url)
@@ -76,6 +102,54 @@ class TrackState:
                 self.file_path = unquote(parsed.path)
             else:
                 self.file_path = url
+
+        # Genre (array of strings -> comma-separated)
+        genres = get_variant_value(metadata.get("xesam:genre"))
+        if isinstance(genres, list) and genres:
+            self.genre = ", ".join(genres)
+        elif isinstance(genres, str):
+            self.genre = genres
+        else:
+            self.genre = None
+
+        # Album artist (array of strings)
+        album_artists = get_variant_value(metadata.get("xesam:albumArtist"))
+        if isinstance(album_artists, list) and album_artists:
+            self.album_artist = album_artists[0]
+        elif isinstance(album_artists, str):
+            self.album_artist = album_artists
+        else:
+            self.album_artist = None
+
+        # Track and disc numbers
+        self.track_number = get_variant_value(metadata.get("xesam:trackNumber"))
+        self.disc_number = get_variant_value(metadata.get("xesam:discNumber"))
+
+        # Release date (ISO 8601 or just year)
+        self.release_date = get_variant_value(metadata.get("xesam:contentCreated"))
+
+        # Art URL
+        self.art_url = get_variant_value(metadata.get("mpris:artUrl"))
+
+        # User rating (0.0 - 1.0)
+        self.user_rating = get_variant_value(metadata.get("xesam:userRating"))
+
+        # BPM
+        self.bpm = get_variant_value(metadata.get("xesam:audioBPM"))
+
+        # Composer (array of strings)
+        composers = get_variant_value(metadata.get("xesam:composer"))
+        if isinstance(composers, list) and composers:
+            self.composer = ", ".join(composers)
+        elif isinstance(composers, str):
+            self.composer = composers
+        else:
+            self.composer = None
+
+        # MusicBrainz track ID
+        self.musicbrainz_track_id = get_variant_value(
+            metadata.get("xesam:musicBrainzTrackID")
+        )
 
     def should_log(self) -> bool:
         """Check if current play meets minimum thresholds.
@@ -273,7 +347,7 @@ class MprisMonitor:
                 log.info(f"[{player_name}] {status}")
 
     def log_play(self, state: TrackState):
-        """Log a play to the database."""
+        """Log a play to the database with full metadata."""
         if not state.title:
             return
 
@@ -292,6 +366,16 @@ class MprisMonitor:
             duration_ms=duration_ms,
             played_ms=played_ms,
             file_path=state.file_path,
+            genre=state.genre,
+            album_artist=state.album_artist,
+            track_number=state.track_number,
+            disc_number=state.disc_number,
+            release_date=state.release_date,
+            art_url=state.art_url,
+            user_rating=state.user_rating,
+            bpm=state.bpm,
+            composer=state.composer,
+            musicbrainz_track_id=state.musicbrainz_track_id,
         )
 
 

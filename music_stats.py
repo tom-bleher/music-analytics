@@ -335,6 +335,44 @@ def display_advanced_stats(start_date: datetime, end_date: datetime, period_name
     except Exception as e:
         pass
 
+    # Genre breakdown
+    print_section("TOP GENRES")
+    try:
+        import db as db_module
+        genres = db_module.get_genre_stats(start_date, end_date)
+        if genres:
+            max_plays = genres[0]['play_count'] if genres else 1
+            for i, row in enumerate(genres[:10], 1):
+                if row['genre']:
+                    bar = print_bar(row['play_count'], max_plays, 20)
+                    print(f"  {i:2}. {row['genre'][:30]:<30} {bar} {row['play_count']:>3}")
+        else:
+            print("  No genre data available yet")
+    except Exception as e:
+        print(f"  No genre data: {e}")
+
+    # Release year breakdown
+    print_section("MUSIC BY DECADE")
+    try:
+        import db as db_module
+        years = db_module.get_release_year_stats(start_date, end_date)
+        if years:
+            # Group by decade
+            decades = {}
+            for row in years:
+                if row['year']:
+                    decade = row['year'][:3] + "0s"
+                    decades[decade] = decades.get(decade, 0) + row['play_count']
+            if decades:
+                max_plays = max(decades.values())
+                for decade in sorted(decades.keys(), reverse=True):
+                    bar = print_bar(decades[decade], max_plays, 20)
+                    print(f"  {decade:<10} {bar} {decades[decade]:>4}")
+        else:
+            print("  No release date data available yet")
+    except Exception as e:
+        print(f"  No release data: {e}")
+
     conn.close()
 
 
