@@ -29,6 +29,24 @@ import db
 # Configuration
 MIN_PLAY_SECONDS = 30  # Minimum seconds to count as a play
 MIN_PLAY_PERCENT = 0.5  # Or 50% of the track
+TRACK_LOCAL_ONLY = True  # Only track local music files (file:// URLs)
+
+# Known local-only players (these don't stream, so assume local)
+# These players may not provide xesam:url metadata
+LOCAL_ONLY_PLAYERS = {
+    "io.bassi.Amberol",      # Amberol - GNOME local music player
+    "org.gnome.Lollypop",    # Lollypop
+    "org.gnome.Music",       # GNOME Music
+    "audacious",             # Audacious
+    "deadbeef",              # DeaDBeeF
+    "quodlibet",             # Quod Libet
+    "clementine",            # Clementine
+    "strawberry",            # Strawberry
+    "rhythmbox",             # Rhythmbox (mostly local)
+    "elisa",                 # Elisa
+    "sayonara",              # Sayonara
+    "cantata",               # Cantata (MPD client)
+}
 
 MPRIS_PREFIX = "org.mpris.MediaPlayer2."
 MPRIS_PATH = "/org/mpris/MediaPlayer2"
@@ -55,6 +73,7 @@ class TrackState:
         self.file_path: Optional[str] = None
         self.start_time: Optional[float] = None
         self.is_playing: bool = False
+        self.is_local: bool = False  # True if source is a local file
 
         # Extended metadata
         self.genre: Optional[str] = None
@@ -83,6 +102,7 @@ class TrackState:
         self.file_path = None
         self.start_time = None
         self.is_playing = False
+        self.is_local = False
         self.genre = None
         self.album_artist = None
         self.track_number = None
@@ -100,7 +120,7 @@ class TrackState:
         self.seek_backward_ms = 0
         self.last_position_us = 0
 
-    def set_metadata(self, metadata: dict):
+    def set_metadata(self, metadata: dict, player_name: Optional[str] = None):
         """Update track info from MPRIS metadata."""
         # Core fields
         self.title = get_variant_value(metadata.get("xesam:title"))
@@ -115,8 +135,9 @@ class TrackState:
         self.album = get_variant_value(metadata.get("xesam:album"))
         self.duration_us = get_variant_value(metadata.get("mpris:length"))
 
-        # File path from URL
+        # File path from URL and local source detection
         url = get_variant_value(metadata.get("xesam:url"))
+        self.is_local = is_local_source(metadata, player_name)
         if url:
             parsed = urlparse(url)
             if parsed.scheme == "file":
@@ -178,8 +199,13 @@ class TrackState:
         Rules (similar to Last.fm):
         - Must play at least 30 seconds
         - AND either: 50% of track, OR 4+ minutes played, OR duration unknown
+        - If TRACK_LOCAL_ONLY is True, only local files are logged
         """
         if not self.title or not self.start_time:
+            return False
+
+        # Skip non-local sources if TRACK_LOCAL_ONLY is enabled
+        if TRACK_LOCAL_ONLY and not self.is_local:
             return False
 
         played_seconds = time.time() - self.start_time
@@ -237,6 +263,44 @@ def get_variant_value(v):
     if isinstance(v, Variant):
         return v.value
     return v
+
+
+def is_local_source(metadata: dict, player_name: Optional[str] = None) -> bool:
+    """Check if the source is a local file based on MPRIS metadata.
+
+    Args:
+        metadata: MPRIS metadata dictionary
+        player_name: Optional player name (e.g., "io.bassi.Amberol")
+
+    Returns:
+        True if the source is a local file (file:// URL or known local player), False otherwise
+    """
+    # Check if player is a known local-only player
+    if player_name:
+        # Extract the player identifier from full bus name
+        # e.g., "org.mpris.MediaPlayer2.io.bassi.Amberol" -> "io.bassi.Amberol"
+        player_id = player_name.replace(MPRIS_PREFIX, "") if player_name.startswith(MPRIS_PREFIX) else player_name
+        if player_id in LOCAL_ONLY_PLAYERS:
+            return True
+
+    url = get_variant_value(metadata.get("xesam:url"))
+    if not url:
+        # No URL provided and not a known local player - likely a streaming service
+        return False
+
+    # Parse the URL and check the scheme
+    parsed = urlparse(url)
+
+    # Local files have file:// scheme
+    if parsed.scheme == "file":
+        return True
+
+    # Also accept paths that start with / (some players provide raw paths)
+    if parsed.scheme == "" and url.startswith("/"):
+        return True
+
+    # Everything else is non-local (http, https, spotify, etc.)
+    return False
 
 
 def get_pulse_volume_for_player(player_name: str) -> Optional[float]:
@@ -483,7 +547,7 @@ class MprisMonitor:
             # Get initial state
             try:
                 metadata = await props_iface.call_get(MPRIS_PLAYER_IFACE, "Metadata")
-                state.set_metadata(get_variant_value(metadata))
+                state.set_metadata(get_variant_value(metadata), name)
             except Exception:
                 pass
 
@@ -540,11 +604,12 @@ class MprisMonitor:
                 self.log_play(player_name, state)
 
             # Update to new track
-            state.set_metadata(metadata)
+            state.set_metadata(metadata, player_name)
             state.start_time = time.time() if state.is_playing else None
 
             if state.title and state.title != old_title:
-                log.info(f"[{player_name}] Track changed: {state.artist} - {state.title}")
+                local_info = "" if state.is_local else " (non-local, won't track)"
+                log.info(f"[{player_name}] Track changed: {state.artist} - {state.title}{local_info}")
 
         # Check for playback status change
         if "PlaybackStatus" in changed:
@@ -663,6 +728,7 @@ class MprisMonitor:
             screen_on=context["screen_on"],
             on_battery=context["on_battery"],
             player_name=player_name.replace(MPRIS_PREFIX, ""),
+            is_local=1 if state.is_local else 0,
         )
 
 
