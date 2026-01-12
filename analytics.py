@@ -527,6 +527,580 @@ def get_hourly_heatmap(
     )
 
 
+# =============================================================================
+# Session and Behavior Analytics
+# =============================================================================
+
+
+class ListeningSession(TypedDict):
+    """Type definition for a listening session."""
+    start_time: str
+    end_time: str
+    duration_minutes: float
+    track_count: int
+    artists: list[str]
+
+
+class AlbumListeningPattern(TypedDict):
+    """Type definition for album listening pattern."""
+    album: str
+    artist: str
+    pattern: str  # 'sequential' or 'shuffle'
+    sequential_plays: int
+    total_plays: int
+    sequential_percentage: float
+
+
+def get_listening_sessions(
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    gap_minutes: int = 30,
+) -> list[ListeningSession]:
+    """Group plays into listening sessions based on time gaps.
+
+    A new session starts when there's a gap of more than `gap_minutes`
+    between consecutive plays.
+
+    Args:
+        start_date: Start of the date range (inclusive). If None, no lower bound.
+        end_date: End of the date range (inclusive). If None, no upper bound.
+        gap_minutes: Minutes of inactivity that defines a new session. Default 30.
+
+    Returns:
+        List of ListeningSession dicts containing:
+            - start_time: ISO format start time of session
+            - end_time: ISO format end time of session
+            - duration_minutes: Total duration of the session
+            - track_count: Number of tracks played in the session
+            - artists: List of unique artists played in the session
+    """
+    conn = get_connection()
+    try:
+        query = """
+            SELECT timestamp, played_ms, duration_ms, artist
+            FROM plays
+            WHERE 1=1
+        """
+        params = []
+
+        if start_date:
+            query += " AND timestamp >= ?"
+            params.append(start_date.isoformat())
+        if end_date:
+            query += " AND timestamp <= ?"
+            params.append(end_date.isoformat())
+
+        query += " ORDER BY timestamp ASC"
+
+        cursor = conn.execute(query, params)
+        rows = cursor.fetchall()
+
+        if not rows:
+            return []
+
+        gap_threshold = timedelta(minutes=gap_minutes)
+        sessions: list[ListeningSession] = []
+
+        # Start first session
+        current_session_start = datetime.fromisoformat(rows[0]["timestamp"])
+        current_session_end = current_session_start
+        current_session_tracks = 1
+        current_session_artists: set[str] = set()
+        if rows[0]["artist"]:
+            current_session_artists.add(rows[0]["artist"])
+        current_session_listening_ms = rows[0]["played_ms"] or rows[0]["duration_ms"] or 0
+
+        for i in range(1, len(rows)):
+            play_time = datetime.fromisoformat(rows[i]["timestamp"])
+            play_duration_ms = rows[i]["played_ms"] or rows[i]["duration_ms"] or 0
+
+            # Calculate gap from end of previous track
+            prev_play_duration = rows[i - 1]["played_ms"] or rows[i - 1]["duration_ms"] or 0
+            prev_end = datetime.fromisoformat(rows[i - 1]["timestamp"]) + timedelta(
+                milliseconds=prev_play_duration
+            )
+            gap = play_time - prev_end
+
+            if gap > gap_threshold:
+                # End current session, start new one
+                session_duration = (current_session_end - current_session_start).total_seconds() / 60
+                # Add duration of last track in session
+                last_track_ms = rows[i - 1]["played_ms"] or rows[i - 1]["duration_ms"] or 0
+                session_duration += last_track_ms / 1000 / 60
+
+                sessions.append(ListeningSession(
+                    start_time=current_session_start.isoformat(),
+                    end_time=current_session_end.isoformat(),
+                    duration_minutes=round(session_duration, 2),
+                    track_count=current_session_tracks,
+                    artists=sorted(list(current_session_artists)),
+                ))
+
+                # Start new session
+                current_session_start = play_time
+                current_session_end = play_time
+                current_session_tracks = 1
+                current_session_artists = set()
+                if rows[i]["artist"]:
+                    current_session_artists.add(rows[i]["artist"])
+                current_session_listening_ms = play_duration_ms
+            else:
+                # Continue session
+                current_session_end = play_time
+                current_session_tracks += 1
+                if rows[i]["artist"]:
+                    current_session_artists.add(rows[i]["artist"])
+                current_session_listening_ms += play_duration_ms
+
+        # Don't forget the last session
+        session_duration = (current_session_end - current_session_start).total_seconds() / 60
+        last_track_ms = rows[-1]["played_ms"] or rows[-1]["duration_ms"] or 0
+        session_duration += last_track_ms / 1000 / 60
+
+        sessions.append(ListeningSession(
+            start_time=current_session_start.isoformat(),
+            end_time=current_session_end.isoformat(),
+            duration_minutes=round(session_duration, 2),
+            track_count=current_session_tracks,
+            artists=sorted(list(current_session_artists)),
+        ))
+
+        return sessions
+    finally:
+        conn.close()
+
+
+def get_behavior_skip_rate(
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> dict:
+    """Calculate skip rate: percentage of tracks where played_ms < 50% of duration_ms.
+
+    Args:
+        start_date: Start of the date range (inclusive). If None, no lower bound.
+        end_date: End of the date range (inclusive). If None, no upper bound.
+
+    Returns:
+        dict with keys:
+            - skip_rate: Percentage of tracks skipped (played < 50%)
+            - total_plays: Total number of plays with valid duration data
+            - skipped_plays: Number of plays that were skipped
+            - most_skipped_tracks: List of most frequently skipped tracks
+    """
+    conn = get_connection()
+    try:
+        query = """
+            SELECT title, artist, played_ms, duration_ms
+            FROM plays
+            WHERE played_ms IS NOT NULL AND duration_ms IS NOT NULL AND duration_ms > 0
+        """
+        params = []
+
+        if start_date:
+            query += " AND timestamp >= ?"
+            params.append(start_date.isoformat())
+        if end_date:
+            query += " AND timestamp <= ?"
+            params.append(end_date.isoformat())
+
+        cursor = conn.execute(query, params)
+        rows = cursor.fetchall()
+
+        if not rows:
+            return {
+                "skip_rate": 0.0,
+                "total_plays": 0,
+                "skipped_plays": 0,
+                "most_skipped_tracks": [],
+            }
+
+        skipped_count = 0
+        skip_counts: dict[tuple[str, str], int] = defaultdict(int)
+
+        for row in rows:
+            completion_ratio = row["played_ms"] / row["duration_ms"]
+            if completion_ratio < 0.5:
+                skipped_count += 1
+                key = (row["title"] or "Unknown", row["artist"] or "Unknown")
+                skip_counts[key] += 1
+
+        total_plays = len(rows)
+        skip_rate = (skipped_count / total_plays) * 100 if total_plays > 0 else 0
+
+        # Get most skipped tracks
+        most_skipped = sorted(
+            [{"title": k[0], "artist": k[1], "skip_count": v} for k, v in skip_counts.items()],
+            key=lambda x: x["skip_count"],
+            reverse=True,
+        )[:10]
+
+        return {
+            "skip_rate": round(skip_rate, 2),
+            "total_plays": total_plays,
+            "skipped_plays": skipped_count,
+            "most_skipped_tracks": most_skipped,
+        }
+    finally:
+        conn.close()
+
+
+def get_completion_rate(
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> dict:
+    """Calculate average percentage of tracks completed.
+
+    Args:
+        start_date: Start of the date range (inclusive). If None, no lower bound.
+        end_date: End of the date range (inclusive). If None, no upper bound.
+
+    Returns:
+        dict with keys:
+            - average_completion: Average percentage of track completed
+            - total_plays: Total number of plays with valid duration data
+            - full_completions: Number of plays where >= 90% was played
+            - partial_plays: Number of plays where < 90% was played
+    """
+    conn = get_connection()
+    try:
+        query = """
+            SELECT played_ms, duration_ms
+            FROM plays
+            WHERE played_ms IS NOT NULL AND duration_ms IS NOT NULL AND duration_ms > 0
+        """
+        params = []
+
+        if start_date:
+            query += " AND timestamp >= ?"
+            params.append(start_date.isoformat())
+        if end_date:
+            query += " AND timestamp <= ?"
+            params.append(end_date.isoformat())
+
+        cursor = conn.execute(query, params)
+        rows = cursor.fetchall()
+
+        if not rows:
+            return {
+                "average_completion": 0.0,
+                "total_plays": 0,
+                "full_completions": 0,
+                "partial_plays": 0,
+            }
+
+        completion_percentages = []
+        full_completions = 0
+        partial_plays = 0
+
+        for row in rows:
+            ratio = min(row["played_ms"] / row["duration_ms"], 1.0)
+            completion_percentages.append(ratio * 100)
+            if ratio >= 0.9:
+                full_completions += 1
+            else:
+                partial_plays += 1
+
+        avg_completion = sum(completion_percentages) / len(completion_percentages)
+
+        return {
+            "average_completion": round(avg_completion, 2),
+            "total_plays": len(rows),
+            "full_completions": full_completions,
+            "partial_plays": partial_plays,
+        }
+    finally:
+        conn.close()
+
+
+def get_repeat_plays(
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> dict:
+    """Find tracks played multiple times in the same session.
+
+    A session is defined by a 30-minute gap between plays.
+
+    Args:
+        start_date: Start of the date range (inclusive). If None, no lower bound.
+        end_date: End of the date range (inclusive). If None, no upper bound.
+
+    Returns:
+        dict with keys:
+            - repeat_tracks: List of tracks repeated within sessions
+            - total_repeats: Total number of repeat plays
+            - sessions_with_repeats: Number of sessions containing repeats
+    """
+    # Get all sessions first
+    sessions = get_listening_sessions(start_date, end_date)
+
+    conn = get_connection()
+    try:
+        repeat_tracks: dict[tuple[str, str], dict] = defaultdict(
+            lambda: {"repeat_count": 0, "sessions_with_repeats": 0}
+        )
+        total_repeats = 0
+        sessions_with_repeats = 0
+
+        for session in sessions:
+            session_start = session["start_time"]
+            session_end = session["end_time"]
+
+            # Get tracks in this session
+            query = """
+                SELECT title, artist, COUNT(*) as play_count
+                FROM plays
+                WHERE timestamp >= ? AND timestamp <= ?
+                GROUP BY title, artist
+                HAVING COUNT(*) > 1
+            """
+            cursor = conn.execute(query, [session_start, session_end])
+            repeated_in_session = cursor.fetchall()
+
+            if repeated_in_session:
+                sessions_with_repeats += 1
+                for row in repeated_in_session:
+                    key = (row["title"] or "Unknown", row["artist"] or "Unknown")
+                    repeats = row["play_count"] - 1  # First play isn't a repeat
+                    repeat_tracks[key]["repeat_count"] += repeats
+                    repeat_tracks[key]["sessions_with_repeats"] += 1
+                    total_repeats += repeats
+
+        # Format results
+        repeat_list = sorted(
+            [
+                {
+                    "title": k[0],
+                    "artist": k[1],
+                    "repeat_count": v["repeat_count"],
+                    "sessions_with_repeats": v["sessions_with_repeats"],
+                }
+                for k, v in repeat_tracks.items()
+            ],
+            key=lambda x: x["repeat_count"],
+            reverse=True,
+        )
+
+        return {
+            "repeat_tracks": repeat_list[:20],
+            "total_repeats": total_repeats,
+            "sessions_with_repeats": sessions_with_repeats,
+        }
+    finally:
+        conn.close()
+
+
+def get_behavior_discovery_rate(
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> dict:
+    """Calculate percentage of plays that are first-time artists.
+
+    An artist is considered "first-time" if this is their first play ever
+    (not just in the date range).
+
+    Args:
+        start_date: Start of the date range (inclusive). If None, no lower bound.
+        end_date: End of the date range (inclusive). If None, no upper bound.
+
+    Returns:
+        dict with keys:
+            - discovery_rate: Percentage of plays that are first-time artists
+            - total_plays: Total number of plays in the range
+            - first_time_plays: Number of plays that were first-time artists
+            - new_artists: List of newly discovered artists
+    """
+    conn = get_connection()
+    try:
+        # Build query for plays in the date range
+        query = """
+            SELECT timestamp, artist
+            FROM plays
+            WHERE artist IS NOT NULL
+        """
+        params = []
+
+        if start_date:
+            query += " AND timestamp >= ?"
+            params.append(start_date.isoformat())
+        if end_date:
+            query += " AND timestamp <= ?"
+            params.append(end_date.isoformat())
+
+        query += " ORDER BY timestamp ASC"
+
+        cursor = conn.execute(query, params)
+        rows = cursor.fetchall()
+
+        if not rows:
+            return {
+                "discovery_rate": 0.0,
+                "total_plays": 0,
+                "first_time_plays": 0,
+                "new_artists": [],
+            }
+
+        # For each play, check if the artist had any plays before this one
+        first_time_plays = 0
+        new_artists: list[dict] = []
+        seen_new_artists: set[str] = set()
+
+        for row in rows:
+            artist = row["artist"]
+            play_time = row["timestamp"]
+
+            # Check if this artist has any plays before this timestamp
+            check_query = """
+                SELECT COUNT(*) as count FROM plays
+                WHERE artist = ? AND timestamp < ?
+            """
+            check_cursor = conn.execute(check_query, [artist, play_time])
+            previous_plays = check_cursor.fetchone()["count"]
+
+            if previous_plays == 0:
+                first_time_plays += 1
+                if artist not in seen_new_artists:
+                    seen_new_artists.add(artist)
+                    new_artists.append({
+                        "artist": artist,
+                        "first_play": play_time,
+                    })
+
+        total_plays = len(rows)
+        discovery_rate = (first_time_plays / total_plays) * 100 if total_plays > 0 else 0
+
+        return {
+            "discovery_rate": round(discovery_rate, 2),
+            "total_plays": total_plays,
+            "first_time_plays": first_time_plays,
+            "new_artists": new_artists,
+        }
+    finally:
+        conn.close()
+
+
+def get_album_listening_patterns(
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> dict:
+    """Detect sequential album plays vs shuffle listening patterns.
+
+    Sequential listening is defined as playing tracks from the same album
+    in order (based on track numbers if available, or consecutive timestamps).
+
+    Args:
+        start_date: Start of the date range (inclusive). If None, no lower bound.
+        end_date: End of the date range (inclusive). If None, no upper bound.
+
+    Returns:
+        dict with keys:
+            - albums: List of AlbumListeningPattern dicts
+            - overall_sequential_rate: Percentage of album plays that were sequential
+            - sequential_albums: Number of albums listened to sequentially
+            - shuffle_albums: Number of albums listened to in shuffle mode
+    """
+    conn = get_connection()
+    try:
+        # Get all plays with album info, ordered by timestamp
+        query = """
+            SELECT timestamp, title, artist, album, track_number
+            FROM plays
+            WHERE album IS NOT NULL AND album != ''
+        """
+        params = []
+
+        if start_date:
+            query += " AND timestamp >= ?"
+            params.append(start_date.isoformat())
+        if end_date:
+            query += " AND timestamp <= ?"
+            params.append(end_date.isoformat())
+
+        query += " ORDER BY timestamp ASC"
+
+        cursor = conn.execute(query, params)
+        rows = cursor.fetchall()
+
+        if not rows:
+            return {
+                "albums": [],
+                "overall_sequential_rate": 0.0,
+                "sequential_albums": 0,
+                "shuffle_albums": 0,
+            }
+
+        # Group plays by album
+        album_plays: dict[tuple[str, str], list] = defaultdict(list)
+        for row in rows:
+            key = (row["album"], row["artist"] or "Unknown")
+            album_plays[key].append({
+                "timestamp": row["timestamp"],
+                "title": row["title"],
+                "track_number": row["track_number"],
+            })
+
+        albums: list[AlbumListeningPattern] = []
+        sequential_albums = 0
+        shuffle_albums = 0
+
+        for (album, artist), plays in album_plays.items():
+            if len(plays) < 2:
+                continue
+
+            # Count sequential plays (consecutive plays from same album)
+            sequential_count = 0
+            for i in range(1, len(plays)):
+                prev_time = datetime.fromisoformat(plays[i - 1]["timestamp"])
+                curr_time = datetime.fromisoformat(plays[i]["timestamp"])
+
+                # Check if plays are within 15 minutes (likely same listening session)
+                time_diff = (curr_time - prev_time).total_seconds() / 60
+                if time_diff <= 15:
+                    # Check track number order if available
+                    prev_track = plays[i - 1]["track_number"]
+                    curr_track = plays[i]["track_number"]
+
+                    if prev_track is not None and curr_track is not None:
+                        if curr_track == prev_track + 1:
+                            sequential_count += 1
+                    else:
+                        # Without track numbers, consider consecutive plays as sequential
+                        sequential_count += 1
+
+            total_plays = len(plays)
+            sequential_pct = (sequential_count / (total_plays - 1)) * 100 if total_plays > 1 else 0
+
+            # Determine pattern
+            pattern = "sequential" if sequential_pct >= 50 else "shuffle"
+            if pattern == "sequential":
+                sequential_albums += 1
+            else:
+                shuffle_albums += 1
+
+            albums.append(AlbumListeningPattern(
+                album=album,
+                artist=artist,
+                pattern=pattern,
+                sequential_plays=sequential_count,
+                total_plays=total_plays,
+                sequential_percentage=round(sequential_pct, 2),
+            ))
+
+        # Sort by total plays descending
+        albums.sort(key=lambda x: x["total_plays"], reverse=True)
+
+        total_albums = sequential_albums + shuffle_albums
+        overall_sequential_rate = (sequential_albums / total_albums) * 100 if total_albums > 0 else 0
+
+        return {
+            "albums": albums[:20],
+            "overall_sequential_rate": round(overall_sequential_rate, 2),
+            "sequential_albums": sequential_albums,
+            "shuffle_albums": shuffle_albums,
+        }
+    finally:
+        conn.close()
+
+
 # Convenience function to run all analytics
 def get_time_analytics(
     start_date: Optional[datetime] = None,

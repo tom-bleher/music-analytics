@@ -55,6 +55,15 @@ def init_db():
         ("app_volume", "REAL"),  # MPRIS app volume (0.0-1.0)
         ("system_volume", "REAL"),  # PulseAudio volume (0.0-1.0)
         ("effective_volume", "REAL"),  # Combined volume (app × system)
+        # Context tracking
+        ("hour_of_day", "INTEGER"),  # 0-23
+        ("day_of_week", "INTEGER"),  # 0=Monday, 6=Sunday
+        ("is_weekend", "INTEGER"),  # 1 if Saturday/Sunday
+        ("season", "TEXT"),  # spring, summer, fall, winter
+        ("active_window", "TEXT"),  # Focused app while listening
+        ("screen_on", "INTEGER"),  # 1 if screen is on
+        ("on_battery", "INTEGER"),  # 1 if on battery power
+        ("player_name", "TEXT"),  # Which player was used
     ]
 
     # Get existing columns
@@ -78,6 +87,30 @@ def init_db():
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_plays_album ON plays(album)
+    """)
+
+    # Create audio_features table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS audio_features (
+            file_path TEXT PRIMARY KEY,
+            tempo REAL,
+            energy REAL,
+            danceability REAL,
+            valence REAL,
+            acousticness REAL,
+            instrumentalness REAL,
+            speechiness REAL,
+            loudness REAL,
+            key INTEGER,
+            mode INTEGER,
+            time_signature INTEGER,
+            analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_audio_features_analyzed
+        ON audio_features(analyzed_at)
     """)
 
     conn.commit()
@@ -108,6 +141,14 @@ def log_play(
     app_volume: Optional[float] = None,
     system_volume: Optional[float] = None,
     effective_volume: Optional[float] = None,
+    hour_of_day: Optional[int] = None,
+    day_of_week: Optional[int] = None,
+    is_weekend: Optional[int] = None,
+    season: Optional[str] = None,
+    active_window: Optional[str] = None,
+    screen_on: Optional[int] = None,
+    on_battery: Optional[int] = None,
+    player_name: Optional[str] = None,
 ):
     """Log a play to the database."""
     conn = get_connection()
@@ -118,16 +159,20 @@ def log_play(
             genre, album_artist, track_number, disc_number, release_date,
             art_url, user_rating, bpm, composer, musicbrainz_track_id,
             seek_count, intro_skipped, seek_forward_ms, seek_backward_ms,
-            app_volume, system_volume, effective_volume
+            app_volume, system_volume, effective_volume,
+            hour_of_day, day_of_week, is_weekend, season,
+            active_window, screen_on, on_battery, player_name
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             title, artist, album, duration_ms, played_ms, file_path,
             genre, album_artist, track_number, disc_number, release_date,
             art_url, user_rating, bpm, composer, musicbrainz_track_id,
             seek_count, intro_skipped, seek_forward_ms, seek_backward_ms,
-            app_volume, system_volume, effective_volume
+            app_volume, system_volume, effective_volume,
+            hour_of_day, day_of_week, is_weekend, season,
+            active_window, screen_on, on_battery, player_name
         ),
     )
     conn.commit()
@@ -220,6 +265,106 @@ def get_release_year_stats(
     rows = cursor.fetchall()
     conn.close()
     return rows
+
+
+def save_audio_features(file_path: str, features: dict):
+    """Save audio features for a file to the database."""
+    conn = get_connection()
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO audio_features (
+            file_path, tempo, energy, danceability, valence,
+            acousticness, instrumentalness, speechiness, loudness,
+            key, mode, time_signature, analyzed_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            file_path,
+            features.get('tempo'),
+            features.get('energy'),
+            features.get('danceability'),
+            features.get('valence'),
+            features.get('acousticness'),
+            features.get('instrumentalness'),
+            features.get('speechiness'),
+            features.get('loudness'),
+            features.get('key'),
+            features.get('mode'),
+            features.get('time_signature'),
+            datetime.now().isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_audio_features(file_path: str) -> Optional[dict]:
+    """Get audio features for a file from the database."""
+    conn = get_connection()
+    cursor = conn.execute(
+        "SELECT * FROM audio_features WHERE file_path = ?",
+        (file_path,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+
+    if row:
+        return {
+            'file_path': row['file_path'],
+            'tempo': row['tempo'],
+            'energy': row['energy'],
+            'danceability': row['danceability'],
+            'valence': row['valence'],
+            'acousticness': row['acousticness'],
+            'instrumentalness': row['instrumentalness'],
+            'speechiness': row['speechiness'],
+            'loudness': row['loudness'],
+            'key': row['key'],
+            'mode': row['mode'],
+            'time_signature': row['time_signature'],
+            'analyzed_at': row['analyzed_at'],
+        }
+    return None
+
+
+def is_file_analyzed(file_path: str) -> bool:
+    """Check if a file has already been analyzed."""
+    conn = get_connection()
+    cursor = conn.execute(
+        "SELECT 1 FROM audio_features WHERE file_path = ?",
+        (file_path,)
+    )
+    result = cursor.fetchone() is not None
+    conn.close()
+    return result
+
+
+def get_all_audio_features() -> List[dict]:
+    """Get all audio features from the database."""
+    conn = get_connection()
+    cursor = conn.execute("SELECT * FROM audio_features")
+    rows = cursor.fetchall()
+    conn.close()
+
+    return [
+        {
+            'file_path': row['file_path'],
+            'tempo': row['tempo'],
+            'energy': row['energy'],
+            'danceability': row['danceability'],
+            'valence': row['valence'],
+            'acousticness': row['acousticness'],
+            'instrumentalness': row['instrumentalness'],
+            'speechiness': row['speechiness'],
+            'loudness': row['loudness'],
+            'key': row['key'],
+            'mode': row['mode'],
+            'time_signature': row['time_signature'],
+            'analyzed_at': row['analyzed_at'],
+        }
+        for row in rows
+    ]
 
 
 # Initialize database on import

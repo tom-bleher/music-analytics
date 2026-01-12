@@ -8,8 +8,10 @@ Monitors MPRIS D-Bus events and logs listening history to SQLite.
 import asyncio
 import logging
 import signal
+import subprocess
 import sys
 import time
+from datetime import datetime
 from typing import Optional, List, Tuple
 from urllib.parse import unquote, urlparse
 
@@ -275,6 +277,123 @@ def get_pulse_volume_for_player(player_name: str) -> Optional[float]:
     return None
 
 
+def get_season(dt: datetime) -> str:
+    """Get the season for a given date (Northern Hemisphere)."""
+    month = dt.month
+    if month in (3, 4, 5):
+        return "spring"
+    elif month in (6, 7, 8):
+        return "summer"
+    elif month in (9, 10, 11):
+        return "fall"
+    else:
+        return "winter"
+
+
+def get_active_window() -> Optional[str]:
+    """Get the currently focused window name."""
+    try:
+        # Try xdotool for X11
+        result = subprocess.run(
+            ["xdotool", "getactivewindow", "getwindowname"],
+            capture_output=True, text=True, timeout=1
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()[:200]  # Limit length
+    except Exception:
+        pass
+
+    try:
+        # Try wlrctl for Wayland
+        result = subprocess.run(
+            ["wlrctl", "toplevel", "focus"],
+            capture_output=True, text=True, timeout=1
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()[:200]
+    except Exception:
+        pass
+
+    return None
+
+
+def get_screen_state() -> Optional[int]:
+    """Check if screen is on (1) or off (0)."""
+    try:
+        # Try using gnome-screensaver
+        result = subprocess.run(
+            ["gnome-screensaver-command", "-q"],
+            capture_output=True, text=True, timeout=1
+        )
+        if result.returncode == 0:
+            return 0 if "is active" in result.stdout.lower() else 1
+    except Exception:
+        pass
+
+    try:
+        # Try using xset for X11
+        result = subprocess.run(
+            ["xset", "q"],
+            capture_output=True, text=True, timeout=1
+        )
+        if result.returncode == 0:
+            # Check if monitor is in standby/suspend/off
+            if "Monitor is Off" in result.stdout:
+                return 0
+            return 1
+    except Exception:
+        pass
+
+    return None
+
+
+def get_power_state() -> Optional[int]:
+    """Check if on battery (1) or plugged in (0)."""
+    try:
+        # Check /sys/class/power_supply
+        import os
+        power_supplies = os.listdir("/sys/class/power_supply/")
+        for ps in power_supplies:
+            if ps.startswith("BAT"):
+                status_path = f"/sys/class/power_supply/{ps}/status"
+                if os.path.exists(status_path):
+                    with open(status_path) as f:
+                        status = f.read().strip().lower()
+                    return 1 if status == "discharging" else 0
+    except Exception:
+        pass
+
+    try:
+        # Try upower
+        result = subprocess.run(
+            ["upower", "-i", "/org/freedesktop/UPower/devices/battery_BAT0"],
+            capture_output=True, text=True, timeout=2
+        )
+        if result.returncode == 0:
+            if "state:" in result.stdout.lower():
+                if "discharging" in result.stdout.lower():
+                    return 1
+                return 0
+    except Exception:
+        pass
+
+    return None
+
+
+def get_context() -> dict:
+    """Get current listening context."""
+    now = datetime.now()
+    return {
+        "hour_of_day": now.hour,
+        "day_of_week": now.weekday(),  # 0=Monday, 6=Sunday
+        "is_weekend": 1 if now.weekday() >= 5 else 0,
+        "season": get_season(now),
+        "active_window": get_active_window(),
+        "screen_on": get_screen_state(),
+        "on_battery": get_power_state(),
+    }
+
+
 class MprisMonitor:
     """Monitors MPRIS players on D-Bus."""
 
@@ -504,6 +623,9 @@ class MprisMonitor:
         if effective_volume is not None:
             vol_info = f", vol: {effective_volume:.0%}"
 
+        # Get context information
+        context = get_context()
+
         log.info(
             f"Logging play: {state.artist} - {state.title} "
             f"({played_ms // 1000}s played{seek_info}{vol_info})"
@@ -533,6 +655,14 @@ class MprisMonitor:
             app_volume=app_volume,
             system_volume=system_volume,
             effective_volume=effective_volume,
+            hour_of_day=context["hour_of_day"],
+            day_of_week=context["day_of_week"],
+            is_weekend=context["is_weekend"],
+            season=context["season"],
+            active_window=context["active_window"],
+            screen_on=context["screen_on"],
+            on_battery=context["on_battery"],
+            player_name=player_name.replace(MPRIS_PREFIX, ""),
         )
 
 

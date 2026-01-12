@@ -19,6 +19,13 @@ try:
 except ImportError:
     HAS_ANALYTICS = False
 
+# Import audio analyzer
+try:
+    import audio_analyzer
+    HAS_AUDIO_ANALYZER = True
+except ImportError:
+    HAS_AUDIO_ANALYZER = False
+
 
 def get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
@@ -300,16 +307,18 @@ def display_advanced_stats(start_date: datetime, end_date: datetime, period_name
     # Track behavior
     print_section("TRACK BEHAVIOR")
     try:
-        skip_rate = analytics.get_skip_rate(conn, start_date, end_date)
-        print(f"  Skip rate:        {skip_rate['skip_percentage']:.1f}%")
-        print(f"  Skipped tracks:   {skip_rate['total_skips']} / {skip_rate['total_plays']}")
+        # Use behavior skip rate (50% threshold)
+        skip_data = analytics.get_behavior_skip_rate(start_date, end_date)
+        print(f"  Skip rate (<50%): {skip_data['skip_rate']:.1f}%")
+        print(f"  Skipped tracks:   {skip_data['skipped_plays']} / {skip_data['total_plays']}")
     except Exception as e:
         print(f"  Error: {e}")
 
     try:
-        full_vs_partial = analytics.get_full_listens_vs_partial(conn, start_date, end_date)
-        print(f"  Full listens:     {full_vs_partial['full_listen_percentage']:.1f}%")
-        print(f"  Avg completion:   {full_vs_partial['average_completion_percentage']:.1f}%")
+        # Use completion rate function
+        completion_data = analytics.get_completion_rate(start_date, end_date)
+        print(f"  Avg completion:   {completion_data['average_completion']:.1f}%")
+        print(f"  Full listens:     {completion_data['full_completions']} / {completion_data['total_plays']}")
     except Exception as e:
         pass
 
@@ -319,13 +328,23 @@ def display_advanced_stats(start_date: datetime, end_date: datetime, period_name
     except Exception as e:
         pass
 
+    try:
+        # Show repeat plays info
+        repeat_data = analytics.get_repeat_plays(start_date, end_date)
+        if repeat_data['total_repeats'] > 0:
+            print(f"  Repeat plays:     {repeat_data['total_repeats']} in {repeat_data['sessions_with_repeats']} sessions")
+    except Exception as e:
+        pass
+
     # Artist insights
     print_section("ARTIST INSIGHTS")
     try:
-        discovery = analytics.get_discovery_rate(conn, start_date, end_date)
+        # Use behavior discovery rate (first-time artist plays)
+        discovery = analytics.get_behavior_discovery_rate(start_date, end_date)
         print(f"  Discovery rate:   {discovery['discovery_rate']:.1f}%")
-        print(f"  New artists:      {discovery['new_artists']}")
-        print(f"  Returning:        {discovery['returning_artists']}")
+        print(f"  First-time plays: {discovery['first_time_plays']} / {discovery['total_plays']}")
+        if discovery['new_artists']:
+            print(f"  New artists:      {len(discovery['new_artists'])}")
     except Exception as e:
         print(f"  Error: {e}")
 
@@ -334,6 +353,21 @@ def display_advanced_stats(start_date: datetime, end_date: datetime, period_name
         print(f"  One-hit wonders:  {len(one_hits)} artists")
     except Exception as e:
         pass
+
+    # Album listening patterns
+    print_section("ALBUM LISTENING PATTERNS")
+    try:
+        patterns = analytics.get_album_listening_patterns(start_date, end_date)
+        print(f"  Sequential rate:  {patterns['overall_sequential_rate']:.1f}%")
+        print(f"  Sequential:       {patterns['sequential_albums']} albums")
+        print(f"  Shuffle mode:     {patterns['shuffle_albums']} albums")
+        if patterns['albums']:
+            print("\n  Top albums by pattern:")
+            for album in patterns['albums'][:5]:
+                pattern_str = "SEQ" if album['pattern'] == 'sequential' else "SHF"
+                print(f"    [{pattern_str}] {album['album'][:30]} - {album['artist'][:15]} ({album['total_plays']} plays)")
+    except Exception as e:
+        print(f"  Error: {e}")
 
     # Genre breakdown
     print_section("TOP GENRES")
@@ -462,6 +496,58 @@ def display_fun_facts(start_date: datetime, end_date: datetime):
     conn.close()
 
 
+def display_sessions(start_date: datetime, end_date: datetime):
+    """Display recent listening sessions."""
+    if not HAS_ANALYTICS:
+        print("Session analytics not available.")
+        return
+
+    print_section("RECENT LISTENING SESSIONS")
+    try:
+        sessions = analytics.get_listening_sessions(start_date, end_date)
+        if not sessions:
+            print("  No listening sessions found for this period.")
+            return
+
+        # Show most recent 10 sessions
+        recent_sessions = sessions[-10:]
+        recent_sessions.reverse()  # Most recent first
+
+        for i, session in enumerate(recent_sessions, 1):
+            start_time = session['start_time']
+            # Parse and format the date nicely
+            try:
+                dt = datetime.fromisoformat(start_time)
+                date_str = dt.strftime("%b %d, %Y %I:%M %p")
+            except ValueError:
+                date_str = start_time[:16]
+
+            duration = session['duration_minutes']
+            track_count = session['track_count']
+            artists = session['artists']
+
+            print(f"\n  Session {i}: {date_str}")
+            print(f"    Duration:   {duration:.0f} minutes")
+            print(f"    Tracks:     {track_count}")
+            if artists:
+                artists_display = ', '.join(artists[:5])
+                if len(artists) > 5:
+                    artists_display += f" (+{len(artists) - 5} more)"
+                print(f"    Artists:    {artists_display}")
+
+        print(f"\n  Total sessions in period: {len(sessions)}")
+
+        # Summary stats
+        if sessions:
+            total_duration = sum(s['duration_minutes'] for s in sessions)
+            avg_duration = total_duration / len(sessions)
+            avg_tracks = sum(s['track_count'] for s in sessions) / len(sessions)
+            print(f"  Average session: {avg_duration:.0f} min, {avg_tracks:.1f} tracks")
+
+    except Exception as e:
+        print(f"  Error: {e}")
+
+
 def display_monthly_evolution(year: int):
     """Display how taste evolved month by month."""
     if not HAS_ANALYTICS:
@@ -494,11 +580,15 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  music-stats                Show this year's stats
-  music-stats --week         Show last 7 days
-  music-stats --full         Show everything
-  music-stats --scan ~/Music Scan library for metadata
-  music-stats --library      Show library statistics
+  music-stats                   Show this year's stats
+  music-stats --week            Show last 7 days
+  music-stats --deep            Show advanced analytics with behavior metrics
+  music-stats --sessions        Show recent listening sessions
+  music-stats --full            Show everything
+  music-stats --scan ~/Music    Scan library for metadata
+  music-stats --library         Show library statistics
+  music-stats --analyze ~/Music Analyze audio files for features (tempo, energy, etc.)
+  music-stats --audio-stats     Show audio feature statistics
         """
     )
 
@@ -509,6 +599,7 @@ Examples:
 
     # Advanced options
     parser.add_argument('--deep', action='store_true', help='Show advanced analytics')
+    parser.add_argument('--sessions', action='store_true', help='Show recent listening sessions')
     parser.add_argument('--milestones', action='store_true', help='Show achievements')
     parser.add_argument('--personality', action='store_true', help='Show listening personality')
     parser.add_argument('--fun-facts', action='store_true', help='Show fun facts')
@@ -518,6 +609,10 @@ Examples:
     # Library options
     parser.add_argument('--scan', metavar='PATH', help='Scan music folder for metadata')
     parser.add_argument('--library', action='store_true', help='Show library statistics')
+
+    # Audio analysis options
+    parser.add_argument('--analyze', metavar='PATH', help='Analyze audio files for features (tempo, energy, etc.)')
+    parser.add_argument('--audio-stats', action='store_true', help='Show audio feature statistics')
 
     args = parser.parse_args()
 
@@ -536,6 +631,24 @@ Examples:
             library_scanner.display_library_stats()
         except ImportError:
             print("Library scanner not available")
+        return
+
+    # Handle audio analysis commands
+    if args.analyze:
+        if not HAS_AUDIO_ANALYZER:
+            print("Audio analyzer not available. Make sure librosa is installed:")
+            print("  pip install librosa")
+            return
+        print(f"Analyzing audio files in: {args.analyze}")
+        audio_analyzer.analyze_library(args.analyze)
+        return
+
+    if args.audio_stats:
+        if not HAS_AUDIO_ANALYZER:
+            print("Audio analyzer not available. Make sure librosa is installed:")
+            print("  pip install librosa")
+            return
+        audio_analyzer.display_library_audio_stats()
         return
 
     now = datetime.now()
@@ -574,6 +687,9 @@ Examples:
     # Show advanced stats if requested
     if args.deep or args.full:
         display_advanced_stats(start_date, end_date, period_name)
+
+    if args.sessions or args.full:
+        display_sessions(start_date, end_date)
 
     if args.milestones or args.full:
         display_milestones()
