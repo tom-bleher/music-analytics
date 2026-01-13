@@ -80,28 +80,42 @@ def get_stats(start_date: datetime = None, end_date: datetime = None):
         where_clause += " AND timestamp <= ?"
         params.append(end_date.isoformat())
 
-    # Total stats
+    # Total stats (normalize "feat." variants for unique artist count)
     total = conn.execute(f"""
         SELECT
             COUNT(*) as play_count,
             SUM(played_ms) as total_ms,
-            COUNT(DISTINCT artist) as unique_artists,
+            COUNT(DISTINCT CASE
+                WHEN INSTR(LOWER(artist), ' feat.') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' feat.') - 1))
+                WHEN INSTR(LOWER(artist), ' feat ') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' feat ') - 1))
+                WHEN INSTR(LOWER(artist), ' featuring ') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' featuring ') - 1))
+                WHEN INSTR(LOWER(artist), ' ft.') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' ft.') - 1))
+                WHEN INSTR(LOWER(artist), ' ft ') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' ft ') - 1))
+                ELSE artist
+            END) as unique_artists,
             COUNT(DISTINCT album) as unique_albums,
             COUNT(DISTINCT title) as unique_songs
         FROM plays
         {where_clause}
     """, params).fetchone()
 
-    # Top artists by play count
+    # Top artists by play count (normalize "feat." variants)
     top_artists = conn.execute(f"""
         SELECT
-            artist,
+            CASE
+                WHEN INSTR(LOWER(artist), ' feat.') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' feat.') - 1))
+                WHEN INSTR(LOWER(artist), ' feat ') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' feat ') - 1))
+                WHEN INSTR(LOWER(artist), ' featuring ') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' featuring ') - 1))
+                WHEN INSTR(LOWER(artist), ' ft.') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' ft.') - 1))
+                WHEN INSTR(LOWER(artist), ' ft ') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' ft ') - 1))
+                ELSE artist
+            END as artist,
             COUNT(*) as play_count,
             SUM(played_ms) as total_ms
         FROM plays
         {where_clause}
         AND artist IS NOT NULL
-        GROUP BY artist
+        GROUP BY 1
         ORDER BY play_count DESC
         LIMIT 10
     """, params).fetchall()
