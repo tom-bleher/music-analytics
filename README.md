@@ -5,8 +5,7 @@ Personal listening analytics for Linux. Tracks play history from MPRIS-compatibl
 ## Screenshots
 
 <p align="center">
-  <img src="screenshots/amberol.png" alt="Amberol music player" width="400"/>
-  <img src="screenshots/stats.png" alt="Music stats output" width="400"/>
+  <img src="screenshots/stats.png" alt="Music stats output" width="600"/>
 </p>
 
 ## Features
