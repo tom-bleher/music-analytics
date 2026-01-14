@@ -53,6 +53,9 @@ MPRIS_PATH = "/org/mpris/MediaPlayer2"
 MPRIS_PLAYER_IFACE = "org.mpris.MediaPlayer2.Player"
 DBUS_PROPS_IFACE = "org.freedesktop.DBus.Properties"
 
+# Exit after this many seconds with no players (0 = never exit)
+IDLE_EXIT_TIMEOUT = 30
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -466,6 +469,7 @@ class MprisMonitor:
         self.tracked_players: dict[str, TrackState] = {}
         self.player_props: dict[str, any] = {}  # Store props interfaces for volume queries
         self.running = True
+        self.idle_since: Optional[float] = None  # When we became idle (no players)
 
     async def start(self):
         """Start monitoring."""
@@ -480,9 +484,22 @@ class MprisMonitor:
 
         log.info("Music tracker started. Monitoring MPRIS players...")
 
-        # Keep running
+        # Set initial idle state if no players found
+        if not self.tracked_players:
+            self.idle_since = time.time()
+            log.info("No players found, starting idle timer...")
+
+        # Keep running (check for idle timeout)
         while self.running:
             await asyncio.sleep(1)
+
+            # Check idle timeout
+            if IDLE_EXIT_TIMEOUT > 0 and self.idle_since is not None:
+                idle_duration = time.time() - self.idle_since
+                if idle_duration >= IDLE_EXIT_TIMEOUT:
+                    log.info(f"No players for {IDLE_EXIT_TIMEOUT}s, exiting...")
+                    self.running = False
+                    break
 
     async def stop(self):
         """Stop monitoring and log any in-progress plays."""
@@ -505,7 +522,8 @@ class MprisMonitor:
             return
 
         if new_owner and not old_owner:
-            # New player appeared
+            # New player appeared - cancel idle timer
+            self.idle_since = None
             log.info(f"Player appeared: {name}")
             asyncio.create_task(self.add_player(name))
         elif old_owner and not new_owner:
@@ -519,6 +537,11 @@ class MprisMonitor:
                 if name in self.player_props:
                     del self.player_props[name]
 
+            # Start idle timer if no players remain
+            if not self.tracked_players:
+                self.idle_since = time.time()
+                log.info(f"No players remaining, will exit in {IDLE_EXIT_TIMEOUT}s if none appear...")
+
     async def discover_players(self):
         """Find existing MPRIS players."""
         introspection = await self.bus.introspect("org.freedesktop.DBus", "/org/freedesktop/DBus")
@@ -529,6 +552,10 @@ class MprisMonitor:
         for name in names:
             if name.startswith(MPRIS_PREFIX):
                 await self.add_player(name)
+
+        # Cancel idle timer if we found players
+        if self.tracked_players:
+            self.idle_since = None
 
     async def add_player(self, name: str):
         """Start monitoring a player."""
