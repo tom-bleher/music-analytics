@@ -80,57 +80,78 @@ def get_stats(start_date: datetime = None, end_date: datetime = None):
         where_clause += " AND timestamp <= ?"
         params.append(end_date.isoformat())
 
-    # Total stats (normalize "feat." variants for unique artist count)
+    # Total stats (normalize "feat." variants and case for unique artist count)
     total = conn.execute(f"""
         SELECT
             COUNT(*) as play_count,
             SUM(played_ms) as total_ms,
-            COUNT(DISTINCT CASE
+            COUNT(DISTINCT LOWER(CASE
                 WHEN INSTR(LOWER(artist), ' feat.') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' feat.') - 1))
                 WHEN INSTR(LOWER(artist), ' feat ') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' feat ') - 1))
                 WHEN INSTR(LOWER(artist), ' featuring ') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' featuring ') - 1))
                 WHEN INSTR(LOWER(artist), ' ft.') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' ft.') - 1))
                 WHEN INSTR(LOWER(artist), ' ft ') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' ft ') - 1))
                 ELSE artist
-            END) as unique_artists,
-            COUNT(DISTINCT album) as unique_albums,
+            END)) as unique_artists,
+            COUNT(DISTINCT LOWER(album)) as unique_albums,
             COUNT(DISTINCT title) as unique_songs
         FROM plays
         {where_clause}
     """, params).fetchone()
 
-    # Top artists by play count (normalize "feat." variants)
+    # Top artists by play count (normalize "feat." variants and case)
     top_artists = conn.execute(f"""
         SELECT
-            CASE
+            MAX(CASE
                 WHEN INSTR(LOWER(artist), ' feat.') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' feat.') - 1))
                 WHEN INSTR(LOWER(artist), ' feat ') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' feat ') - 1))
                 WHEN INSTR(LOWER(artist), ' featuring ') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' featuring ') - 1))
                 WHEN INSTR(LOWER(artist), ' ft.') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' ft.') - 1))
                 WHEN INSTR(LOWER(artist), ' ft ') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' ft ') - 1))
                 ELSE artist
-            END as artist,
+            END) as artist,
             COUNT(*) as play_count,
             SUM(played_ms) as total_ms
         FROM plays
         {where_clause}
         AND artist IS NOT NULL
-        GROUP BY 1
+        GROUP BY LOWER(CASE
+            WHEN INSTR(LOWER(artist), ' feat.') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' feat.') - 1))
+            WHEN INSTR(LOWER(artist), ' feat ') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' feat ') - 1))
+            WHEN INSTR(LOWER(artist), ' featuring ') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' featuring ') - 1))
+            WHEN INSTR(LOWER(artist), ' ft.') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' ft.') - 1))
+            WHEN INSTR(LOWER(artist), ' ft ') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' ft ') - 1))
+            ELSE artist
+        END)
         ORDER BY play_count DESC
         LIMIT 10
     """, params).fetchall()
 
-    # Top albums
+    # Top albums (normalize artist names: feat. variants and case)
     top_albums = conn.execute(f"""
         SELECT
-            album,
-            artist,
+            MAX(album) as album,
+            MAX(CASE
+                WHEN INSTR(LOWER(artist), ' feat.') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' feat.') - 1))
+                WHEN INSTR(LOWER(artist), ' feat ') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' feat ') - 1))
+                WHEN INSTR(LOWER(artist), ' featuring ') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' featuring ') - 1))
+                WHEN INSTR(LOWER(artist), ' ft.') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' ft.') - 1))
+                WHEN INSTR(LOWER(artist), ' ft ') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' ft ') - 1))
+                ELSE artist
+            END) as artist,
             COUNT(*) as play_count,
             SUM(played_ms) as total_ms
         FROM plays
         {where_clause}
         AND album IS NOT NULL
-        GROUP BY album, artist
+        GROUP BY LOWER(album), LOWER(CASE
+            WHEN INSTR(LOWER(artist), ' feat.') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' feat.') - 1))
+            WHEN INSTR(LOWER(artist), ' feat ') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' feat ') - 1))
+            WHEN INSTR(LOWER(artist), ' featuring ') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' featuring ') - 1))
+            WHEN INSTR(LOWER(artist), ' ft.') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' ft.') - 1))
+            WHEN INSTR(LOWER(artist), ' ft ') > 0 THEN TRIM(SUBSTR(artist, 1, INSTR(LOWER(artist), ' ft ') - 1))
+            ELSE artist
+        END)
         ORDER BY play_count DESC
         LIMIT 10
     """, params).fetchall()
@@ -221,9 +242,9 @@ def display_stats(stats: dict, period_name: str):
         max_plays = stats['top_albums'][0]['play_count'] if stats['top_albums'] else 1
         for i, row in enumerate(stats['top_albums'], 1):
             bar = print_bar(row['play_count'], max_plays, 20)
-            album_display = f"{row['album'][:25]}" if row['album'] else "Unknown Album"
-            artist_display = f"by {row['artist'][:15]}" if row['artist'] else ""
-            print(f"  {i:2}. {album_display:<25} {artist_display:<18} {bar} {row['play_count']:>3}")
+            album_display = f"{row['album'][:35]}" if row['album'] else "Unknown Album"
+            artist_display = f"by {row['artist'][:25]}" if row['artist'] else ""
+            print(f"  {i:2}. {album_display:<35} {artist_display:<28} {bar} {row['play_count']:>3}")
 
     # Top Songs
     if stats['top_songs']:
