@@ -2,6 +2,13 @@
 
 Personal listening analytics for Linux. Tracks play history from MPRIS-compatible players and generates Spotify Wrapped-style statistics.
 
+## Screenshots
+
+<p align="center">
+  <img src="screenshots/amberol.png" alt="Amberol music player" width="400"/>
+  <img src="screenshots/stats.png" alt="Music stats output" width="400"/>
+</p>
+
 ## Features
 
 **Tracking**
