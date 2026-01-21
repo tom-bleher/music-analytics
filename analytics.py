@@ -348,8 +348,8 @@ def get_night_owl_score(
             total_listening_minutes=0.0,
         )
 
-    # Get night plays (00:00 - 06:00)
-    night_query = base_query + " AND CAST(strftime('%H', timestamp) AS INTEGER) < 6"
+    # Get night plays (00:00 - 06:00) using local time from hour_of_day column
+    night_query = base_query + " AND hour_of_day IS NOT NULL AND hour_of_day < 6"
     cursor = conn.execute(night_query, params)
     night_row = cursor.fetchone()
     night_plays = night_row["play_count"]
@@ -481,10 +481,10 @@ def get_hourly_heatmap(
     """
     query = """
         SELECT
-            CAST(strftime('%H', timestamp) AS INTEGER) as hour,
+            hour_of_day as hour,
             COUNT(*) as play_count
         FROM plays
-        WHERE 1=1
+        WHERE hour_of_day IS NOT NULL
     """
     params = []
 
@@ -495,7 +495,7 @@ def get_hourly_heatmap(
         query += " AND timestamp <= ?"
         params.append(end_date.isoformat())
 
-    query += " GROUP BY hour ORDER BY hour"
+    query += " GROUP BY hour_of_day ORDER BY hour_of_day"
 
     cursor = conn.execute(query, params)
     rows = cursor.fetchall()
@@ -2301,15 +2301,16 @@ def get_listening_personality(
     else:
         scores['loyalist'] = 0
 
-    # === NIGHT OWL SCORE ===
+    # === NIGHT OWL SCORE === (use hour_of_day for local time)
     cursor = conn.execute(f"""
         SELECT
-            SUM(CASE WHEN CAST(strftime('%H', timestamp) AS INTEGER) BETWEEN 22 AND 23
-                     OR CAST(strftime('%H', timestamp) AS INTEGER) BETWEEN 0 AND 4
+            SUM(CASE WHEN hour_of_day BETWEEN 22 AND 23
+                     OR hour_of_day BETWEEN 0 AND 4
                 THEN 1 ELSE 0 END) as late_night,
             COUNT(*) as total
         FROM plays
         {where_clause}
+        AND hour_of_day IS NOT NULL
     """, params)
     time_dist = cursor.fetchone()
 
@@ -2324,14 +2325,15 @@ def get_listening_personality(
     else:
         scores['night_owl'] = 0
 
-    # === EARLY BIRD SCORE ===
+    # === EARLY BIRD SCORE === (use hour_of_day for local time)
     cursor = conn.execute(f"""
         SELECT
-            SUM(CASE WHEN CAST(strftime('%H', timestamp) AS INTEGER) BETWEEN 5 AND 9
+            SUM(CASE WHEN hour_of_day BETWEEN 5 AND 9
                 THEN 1 ELSE 0 END) as early_morning,
             COUNT(*) as total
         FROM plays
         {where_clause}
+        AND hour_of_day IS NOT NULL
     """, params)
     morning_dist = cursor.fetchone()
 
@@ -2394,14 +2396,16 @@ def get_listening_personality(
     else:
         scores['binge_listener'] = 0
 
-    # === WEEKEND WARRIOR SCORE ===
+    # === WEEKEND WARRIOR SCORE === (use day_of_week for local time)
+    # day_of_week uses Python convention: 0=Monday, so weekend is 5=Saturday, 6=Sunday
     cursor = conn.execute(f"""
         SELECT
-            SUM(CASE WHEN CAST(strftime('%w', timestamp) AS INTEGER) IN (0, 6)
+            SUM(CASE WHEN day_of_week IN (5, 6)
                 THEN 1 ELSE 0 END) as weekend,
             COUNT(*) as total
         FROM plays
         {where_clause}
+        AND day_of_week IS NOT NULL
     """, params)
     weekend_dist = cursor.fetchone()
 
@@ -2573,12 +2577,13 @@ def get_fun_facts(
     if biggest_day and biggest_day['plays'] >= 10:
         facts.append(f"Your biggest listening day had {biggest_day['plays']} plays on {biggest_day['play_date']}!")
 
-    # Time of day facts
+    # Time of day facts (use hour_of_day for local time)
     cursor = conn.execute(f"""
-        SELECT CAST(strftime('%H', timestamp) AS INTEGER) as hour, COUNT(*) as plays
+        SELECT hour_of_day as hour, COUNT(*) as plays
         FROM plays
         {where_clause}
-        GROUP BY hour
+        AND hour_of_day IS NOT NULL
+        GROUP BY hour_of_day
         ORDER BY plays DESC
         LIMIT 1
     """, params)
