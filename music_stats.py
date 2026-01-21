@@ -170,26 +170,29 @@ def get_stats(start_date: datetime = None, end_date: datetime = None):
         LIMIT 10
     """, params).fetchall()
 
-    # Plays by hour of day
+    # Plays by hour of day (use hour_of_day column which stores local time)
     hourly = conn.execute(f"""
         SELECT
-            CAST(strftime('%H', timestamp) AS INTEGER) as hour,
+            hour_of_day as hour,
             COUNT(*) as play_count
         FROM plays
         {where_clause}
-        GROUP BY hour
-        ORDER BY hour
+        AND hour_of_day IS NOT NULL
+        GROUP BY hour_of_day
+        ORDER BY hour_of_day
     """, params).fetchall()
 
-    # Plays by day of week
+    # Plays by day of week (use day_of_week column which stores local time)
+    # Note: day_of_week uses Python convention: 0=Monday, 6=Sunday
     daily = conn.execute(f"""
         SELECT
-            CAST(strftime('%w', timestamp) AS INTEGER) as dow,
+            day_of_week as dow,
             COUNT(*) as play_count
         FROM plays
         {where_clause}
-        GROUP BY dow
-        ORDER BY dow
+        AND day_of_week IS NOT NULL
+        GROUP BY day_of_week
+        ORDER BY day_of_week
     """, params).fetchall()
 
     conn.close()
@@ -277,7 +280,8 @@ def display_stats(stats: dict, period_name: str):
     # Listening by day
     if stats['daily']:
         print_section("LISTENING BY DAY OF WEEK")
-        day_names = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+        # Python weekday convention: 0=Monday, 6=Sunday
+        day_names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
         daily_dict = {row['dow']: row['play_count'] for row in stats['daily']}
         max_daily = max(daily_dict.values()) if daily_dict else 1
 
